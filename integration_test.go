@@ -223,8 +223,9 @@ func TestIntegrationGarbageLevelsSafe(t *testing.T) {
 	}
 }
 
-// The module must strip the header even when the origin sets it on an
-// error response handled without a body write.
+// min_level defaults to 2, so level-1 responses never count toward the
+// budget even with a limit small enough that counting them would box
+// immediately.
 func TestIntegrationMinLevelDefaultIgnoresLevel1(t *testing.T) {
 	tester := caddytest.NewTester(t)
 	// min_level omitted → default 2; limit tiny so any counting of

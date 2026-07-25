@@ -18,8 +18,9 @@ type boxStore interface {
 	// boxedRemaining reports whether key is actively boxed and, if so,
 	// how long until the box expires.
 	boxedRemaining(key string) (time.Duration, bool)
-	// add credits units to key's sliding window. It returns true when
-	// this call pushed the window total over the limit and boxed the key.
+	// add records the given number of weighted units against key's
+	// sliding window. It returns true when this call pushed the window
+	// total over the limit and boxed the key.
 	add(key string, units int) bool
 	// stop halts background maintenance (the sweeper goroutine).
 	stop()
@@ -110,8 +111,9 @@ func (s *store) boxedRemaining(key string) (time.Duration, bool) {
 	return remaining, true
 }
 
-// add's callers must pre-filter levels below min_level: keys with only
-// low-level traffic must never allocate an entry (design requirement).
+// Callers must filter out levels below min_level before calling add:
+// keys with only low-level traffic must never allocate an entry
+// (design requirement).
 func (s *store) add(key string, units int) bool {
 	now := s.clk.Now()
 	sh := s.shardFor(key)
