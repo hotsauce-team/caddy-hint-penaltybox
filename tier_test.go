@@ -159,7 +159,7 @@ func TestTierBoxingResetsOnlyThatTier(t *testing.T) {
 	}
 }
 
-func TestTierRetryAfterIsMaxAcrossBoxes(t *testing.T) {
+func TestTierBoxTTLComesFromCrossingTier(t *testing.T) {
 	clk := newFakeClock()
 	s := newStore(storeConfig{
 		window: time.Minute, limit: 30, penaltyTTL: 5 * time.Minute, maxKeys: 1000,
@@ -169,9 +169,9 @@ func TestTierRetryAfterIsMaxAcrossBoxes(t *testing.T) {
 		},
 	}, clk)
 
-	// Box tier 3 (long TTL) first, then... the entry-level box gates
-	// further counting, so only one box can be active per entry — assert
-	// the longer TTL wins when boxing happens.
+	// Only one box can be active per entry (the entry-level box gates
+	// further counting), so what matters is that each box carries the
+	// TTL of the tier whose limit was crossed.
 	s.add("k", 3)
 	s.add("k", 3) // boxed for 10m
 	remaining, boxed := s.boxedRemaining("k")

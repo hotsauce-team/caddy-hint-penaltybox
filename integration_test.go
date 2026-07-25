@@ -246,13 +246,13 @@ func TestIntegrationTierBudgets(t *testing.T) {
 	// consume tier 3's.
 	for i := 0; i < 20; i++ {
 		if resp := get(t, tester, "heidi", "2"); resp.StatusCode != 200 {
-			t.Fatalf("level-2 request %d should pass, got %d", i, resp.StatusCode)
+			t.Fatalf("level-2 request %d should pass, got %d", i+1, resp.StatusCode)
 		}
 	}
 	// Tier 3 still has its full budget of 2; the 3rd level-3 boxes.
 	for i := 0; i < 3; i++ {
 		if resp := get(t, tester, "heidi", "3"); resp.StatusCode != 200 {
-			t.Fatalf("level-3 request %d should pass (tier budget untouched by level 2), got %d", i, resp.StatusCode)
+			t.Fatalf("level-3 request %d should pass (tier budget untouched by level 2), got %d", i+1, resp.StatusCode)
 		}
 	}
 	resp := get(t, tester, "heidi", "2")
