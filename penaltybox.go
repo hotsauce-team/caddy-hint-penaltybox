@@ -169,6 +169,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 
 	if remaining, boxed := h.store.boxedRemaining(key); boxed {
+		// Strip here too: earlier middleware may already have set the
+		// hint header, and the contract is that it never reaches the
+		// client on any response path — boxed responses included.
+		if h.stripOn {
+			delete(w.Header(), h.headerCanon)
+		}
 		// Written directly rather than via caddyhttp.Error so that
 		// Retry-After survives any handle_errors routes.
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(remaining)))

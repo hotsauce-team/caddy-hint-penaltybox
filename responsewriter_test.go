@@ -124,6 +124,27 @@ func TestIntercept1xxPassthrough(t *testing.T) {
 	}
 }
 
+func TestIntercept101IsFinal(t *testing.T) {
+	// 101 Switching Protocols is the final response of an upgrade, not
+	// an interim 1xx: the hint must be counted and stripped.
+	h, st := newTestHandler(newFakeClock(), storeConfig{})
+	rec := httptest.NewRecorder()
+	rw := interceptorFor(h, "k", rec)
+
+	rw.Header().Set("X-Rate-Limit-Level", "3")
+	rw.WriteHeader(http.StatusSwitchingProtocols)
+
+	if !rw.intercepted {
+		t.Fatal("101 must trigger interception")
+	}
+	if got := rec.Header().Get("X-Rate-Limit-Level"); got != "" {
+		t.Errorf("hint must be stripped on 101, got %q", got)
+	}
+	if st.size() != 1 {
+		t.Error("level-3 hint on a 101 response must count")
+	}
+}
+
 func TestStripDisabled(t *testing.T) {
 	h, _ := newTestHandler(newFakeClock(), storeConfig{})
 	h.stripOn = false

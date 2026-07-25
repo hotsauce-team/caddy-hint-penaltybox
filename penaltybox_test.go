@@ -88,6 +88,34 @@ func TestServeHTTPBoxesAndRejects(t *testing.T) {
 	}
 }
 
+func TestServeHTTPBoxedResponseStripsPreexistingHint(t *testing.T) {
+	clk := newFakeClock()
+	h, _ := newTestHandler(clk, storeConfig{limit: 5, penaltyTTL: time.Minute})
+	h.Key = "{test.client}"
+	h.Status = http.StatusTooManyRequests
+
+	serveReq(t, h, "client-a", levelNext("3"))
+	serveReq(t, h, "client-a", levelNext("3")) // boxed now
+
+	// Simulate earlier middleware having already set the hint header
+	// before this handler runs: the boxed 429 must still strip it.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	repl := caddy.NewReplacer()
+	repl.Set("test.client", "client-a")
+	req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+	rec := httptest.NewRecorder()
+	rec.Header().Set("X-Rate-Limit-Level", "3")
+	if err := h.ServeHTTP(rec, req, levelNext("")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Rate-Limit-Level"); got != "" {
+		t.Errorf("boxed 429 must strip a pre-set hint header, got %q", got)
+	}
+}
+
 func TestServeHTTPClientIsolation(t *testing.T) {
 	clk := newFakeClock()
 	h, _ := newTestHandler(clk, storeConfig{limit: 5, penaltyTTL: time.Minute})
