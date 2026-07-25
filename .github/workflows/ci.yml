@@ -1,0 +1,46 @@
+# Every job runs the same Makefile/compose targets as local development —
+# no Go toolchain on the runner; the container images are the pin.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Adds the CI override that bind-mounts Go caches under ./.cache so
+  # actions/cache can persist them.
+  COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: lint-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: lint-${{ runner.os }}-
+      - run: make lint COMPOSE="$COMPOSE"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: test-${{ runner.os }}-
+      - run: make vet COMPOSE="$COMPOSE"
+      - run: make test COMPOSE="$COMPOSE"
+      - run: make test-integration COMPOSE="$COMPOSE"
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      # make e2e dumps caddy/upstream logs itself when scenarios fail.
+      - run: make e2e

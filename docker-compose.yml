@@ -1,0 +1,52 @@
+services:
+  # Go toolchain for unit/integration tests, vet, tidy. The image is the
+  # toolchain pin — no Go install needed on the host.
+  dev:
+    image: golang:1.25-bookworm
+    working_dir: /src
+    environment:
+      GOFLAGS: -buildvcs=false
+    volumes:
+      - .:/src
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+
+  lint:
+    image: golangci/golangci-lint:v2.6.2
+    working_dir: /src
+    environment:
+      GOFLAGS: -buildvcs=false
+    volumes:
+      - .:/src
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+      - golangcicache:/root/.cache/golangci-lint
+
+  # Stub origin for e2e: echoes the requested hint level back as the
+  # X-Rate-Limit-Level response header.
+  e2e-upstream:
+    image: caddy:2.11.4
+    volumes:
+      - ./e2e/upstream.Caddyfile:/etc/caddy/Caddyfile:ro
+
+  # The module-enabled Caddy under test, built with xcaddy from this repo.
+  e2e-caddy:
+    build:
+      context: .
+      dockerfile: e2e/Dockerfile
+    depends_on:
+      - e2e-upstream
+
+  # Runs the curl scenario assertions; its exit code gates `make e2e`.
+  e2e-runner:
+    image: curlimages/curl:8.14.1
+    depends_on:
+      - e2e-caddy
+    volumes:
+      - ./e2e/run.sh:/run.sh:ro
+    entrypoint: ["/bin/sh", "/run.sh"]
+
+volumes:
+  gomodcache:
+  gobuildcache:
+  golangcicache:

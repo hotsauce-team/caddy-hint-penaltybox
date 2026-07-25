@@ -1,0 +1,6 @@
+.git
+.cache
+.github
+Makefile
+docker-compose*.yml
+*.md
