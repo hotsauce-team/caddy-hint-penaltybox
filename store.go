@@ -8,6 +8,7 @@ import (
 const (
 	numShards  = 64 // power of two; FNV hash masked onto this
 	numBuckets = 16 // sliding-window resolution: window/16 per bucket
+	maxLevel   = 3  // wire contract: levels are 1..3
 )
 
 // boxStore is what the handler talks to. It is deliberately small so a
@@ -16,14 +17,21 @@ const (
 // store without touching handler code or config.
 type boxStore interface {
 	// boxedRemaining reports whether key is actively boxed and, if so,
-	// how long until the box expires.
+	// how long until the box expires (the maximum across tiers).
 	boxedRemaining(key string) (time.Duration, bool)
-	// add records the given number of weighted units against key's
-	// sliding window. It returns true when this call pushed the window
-	// total over the limit and boxed the key.
-	add(key string, units int) bool
+	// add records one response of the given hint level against key's
+	// budget for that level's tier. It returns true when this call
+	// pushed a tier over its limit and boxed the key.
+	add(key string, level int) bool
 	// stop halts background maintenance (the sweeper goroutine).
 	stop()
+}
+
+// tierSpec is an explicit per-level budget from config.
+type tierSpec struct {
+	window     time.Duration
+	limit      int
+	penaltyTTL time.Duration
 }
 
 type storeConfig struct {
@@ -31,14 +39,29 @@ type storeConfig struct {
 	limit      int
 	penaltyTTL time.Duration
 	maxKeys    int
+	tiers      map[int]tierSpec // level (1..3) -> explicit budget
+}
+
+// tierBudget is a resolved budget the store enforces. Slot 0 is always
+// the default budget (the top-level window/limit/penalty_ttl), which
+// keeps the original weighted semantics: a level-N response costs N
+// units. Explicit tiers count responses instead (increment 1), because
+// within a single-level tier a weight is just a constant multiplier —
+// "limit 5" on tier 3 literally means five level-3 responses.
+type tierBudget struct {
+	window     time.Duration
+	limit      uint64
+	penaltyTTL time.Duration
+	bucketDur  time.Duration
+	weighted   bool // true only for the default budget (slot 0)
 }
 
 type store struct {
 	shards      [numShards]shard
-	window      time.Duration
-	bucketDur   time.Duration
-	limit       uint64
-	penaltyTTL  time.Duration
+	budgets     []tierBudget      // slot 0 = default; then explicit tiers
+	levelSlot   [maxLevel + 1]int // hint level -> budget slot
+	maxWindow   time.Duration     // longest window across budgets (sweep idle bound)
+	sweepEvery  time.Duration
 	maxPerShard int
 	clk         clock
 
@@ -51,32 +74,84 @@ type shard struct {
 	entries map[string]*entry
 }
 
-// entry is one tracked client: a 16-bucket ring of weighted units
-// covering the sliding window, plus box state. ~150 bytes regardless of
-// traffic volume.
+// entry is one tracked client: lazily-allocated per-tier ring counters
+// plus box state. boxedUntil is the maximum across tiers — safe to
+// maintain incrementally because boxes have fixed TTLs (they only ever
+// expire, never shrink).
 type entry struct {
-	buckets    [numBuckets]uint32
-	head       int       // index of the bucket covering headStart..headStart+bucketDur
-	headStart  time.Time // start of the head bucket
-	total      uint64    // running sum of live buckets
-	lastSeen   time.Time // for oldest-first eviction
+	lastSeen   time.Time
 	boxedUntil time.Time // zero = not boxed
+	counters   []*tierCounter
+}
+
+// tierCounter is a 16-bucket ring of units covering one budget's
+// sliding window.
+type tierCounter struct {
+	buckets   [numBuckets]uint32
+	head      int       // index of the bucket covering headStart..headStart+bucketDur
+	headStart time.Time // start of the head bucket
+	total     uint64    // running sum of live buckets
 }
 
 func newStore(cfg storeConfig, clk clock) *store {
 	s := &store{
-		window:      cfg.window,
-		bucketDur:   max(cfg.window/numBuckets, 1),
-		limit:       uint64(cfg.limit),
-		penaltyTTL:  cfg.penaltyTTL,
 		maxPerShard: max(cfg.maxKeys/numShards, 1),
 		clk:         clk,
 		done:        make(chan struct{}),
 	}
+
+	// Slot 0: the default budget, weighted for backward compatibility.
+	s.budgets = []tierBudget{{
+		window:     cfg.window,
+		limit:      uint64(cfg.limit),
+		penaltyTTL: cfg.penaltyTTL,
+		bucketDur:  max(cfg.window/numBuckets, 1),
+		weighted:   true,
+	}}
+	s.maxWindow = cfg.window
+	maxTTL := cfg.penaltyTTL
+
+	slotOf := map[int]int{}
+	for level := 1; level <= maxLevel; level++ {
+		spec, ok := cfg.tiers[level]
+		if !ok {
+			continue
+		}
+		s.budgets = append(s.budgets, tierBudget{
+			window:     spec.window,
+			limit:      uint64(spec.limit),
+			penaltyTTL: spec.penaltyTTL,
+			bucketDur:  max(spec.window/numBuckets, 1),
+		})
+		slotOf[level] = len(s.budgets) - 1
+		s.maxWindow = max(s.maxWindow, spec.window)
+		maxTTL = max(maxTTL, spec.penaltyTTL)
+	}
+
+	// A level uses its own tier if configured, else the nearest
+	// configured tier below it (a level-3 response is at least as
+	// sensitive as level 2), else the default budget.
+	for level := 1; level <= maxLevel; level++ {
+		slot := 0
+		for l := level; l >= 1; l-- {
+			if sl, ok := slotOf[l]; ok {
+				slot = sl
+				break
+			}
+		}
+		s.levelSlot[level] = slot
+	}
+
+	s.sweepEvery = sweepInterval(s.maxWindow, maxTTL)
 	for i := range s.shards {
 		s.shards[i].entries = make(map[string]*entry)
 	}
 	return s
+}
+
+func sweepInterval(window, ttl time.Duration) time.Duration {
+	interval := max(window, ttl) / 4
+	return min(max(interval, time.Second), time.Minute)
 }
 
 // shardFor hashes key with inline FNV-1a (no []byte conversion, no
@@ -114,7 +189,10 @@ func (s *store) boxedRemaining(key string) (time.Duration, bool) {
 // Callers must filter out levels below min_level before calling add:
 // keys with only low-level traffic must never allocate an entry
 // (design requirement).
-func (s *store) add(key string, units int) bool {
+func (s *store) add(key string, level int) bool {
+	if level < 1 || level > maxLevel {
+		return false
+	}
 	now := s.clk.Now()
 	sh := s.shardFor(key)
 	sh.mu.Lock()
@@ -125,29 +203,44 @@ func (s *store) add(key string, units int) bool {
 		if len(sh.entries) >= s.maxPerShard {
 			s.makeRoomLocked(sh, now)
 		}
-		e = &entry{headStart: now}
+		e = &entry{counters: make([]*tierCounter, len(s.budgets))}
 		sh.entries[key] = e
 	}
 	e.lastSeen = now
 
 	// Fixed-TTL policy (Fastly semantics): traffic while boxed neither
-	// counts nor extends the penalty.
+	// counts nor extends the penalty. (While boxed, origin responses
+	// only arrive for requests that were in flight before the box shut.)
 	if e.boxedUntil.After(now) {
 		return false
 	}
 
-	e.advance(now, s.bucketDur)
-	e.buckets[e.head] += uint32(units)
-	e.total += uint64(units)
+	slot := s.levelSlot[level]
+	budget := &s.budgets[slot]
+	tc := e.counters[slot]
+	if tc == nil {
+		// Lazy: a client only allocates counters for tiers it triggers.
+		tc = &tierCounter{headStart: now}
+		e.counters[slot] = tc
+	}
 
-	if e.total > s.limit {
-		e.boxedUntil = now.Add(s.penaltyTTL)
-		// The budget restarts from zero once the box expires.
-		e.buckets = [numBuckets]uint32{}
-		e.total = 0
-		e.head = 0
-		e.headStart = now
-		// metrics hook (v1.1): boxed_total would increment here.
+	tc.advance(now, budget.bucketDur)
+	inc := uint32(1)
+	if budget.weighted {
+		inc = uint32(level)
+	}
+	tc.buckets[tc.head] += inc
+	tc.total += uint64(inc)
+
+	if tc.total > budget.limit {
+		boxedUntil := now.Add(budget.penaltyTTL)
+		if boxedUntil.After(e.boxedUntil) {
+			e.boxedUntil = boxedUntil
+		}
+		// This tier's budget restarts from zero once the box expires;
+		// other tiers keep their windows (which decay naturally).
+		*tc = tierCounter{headStart: now}
+		// metrics hook (v1.1): boxed_total{tier} would increment here.
 		return true
 	}
 	return false
@@ -155,25 +248,22 @@ func (s *store) add(key string, units int) bool {
 
 // advance rotates the ring so the head bucket covers now, dropping
 // buckets that have slid out of the window.
-func (e *entry) advance(now time.Time, bucketDur time.Duration) {
-	elapsed := now.Sub(e.headStart)
+func (tc *tierCounter) advance(now time.Time, bucketDur time.Duration) {
+	elapsed := now.Sub(tc.headStart)
 	if elapsed < bucketDur {
 		return
 	}
 	steps := int(elapsed / bucketDur)
 	if steps >= numBuckets {
-		e.buckets = [numBuckets]uint32{}
-		e.total = 0
-		e.head = 0
-		e.headStart = now
+		*tc = tierCounter{headStart: now}
 		return
 	}
 	for i := 0; i < steps; i++ {
-		e.head = (e.head + 1) % numBuckets
-		e.total -= uint64(e.buckets[e.head])
-		e.buckets[e.head] = 0
+		tc.head = (tc.head + 1) % numBuckets
+		tc.total -= uint64(tc.buckets[tc.head])
+		tc.buckets[tc.head] = 0
 	}
-	e.headStart = e.headStart.Add(time.Duration(steps) * bucketDur)
+	tc.headStart = tc.headStart.Add(time.Duration(steps) * bucketDur)
 }
 
 // makeRoomLocked frees at least one slot in a full shard: drop expired
@@ -204,13 +294,14 @@ func (s *store) makeRoomLocked(sh *shard, now time.Time) {
 }
 
 // sweepShardLocked removes entries that are not actively boxed and have
-// been idle longer than the window (their counters have fully decayed).
+// been idle longer than the longest configured window (all their
+// counters have fully decayed).
 func (s *store) sweepShardLocked(sh *shard, now time.Time) {
 	for k, e := range sh.entries {
 		if e.boxedUntil.After(now) {
 			continue
 		}
-		if now.Sub(e.lastSeen) > s.window {
+		if now.Sub(e.lastSeen) > s.maxWindow {
 			delete(sh.entries, k)
 		}
 	}
@@ -230,12 +321,10 @@ func (s *store) sweepAll() {
 // no logic of its own (it only calls sweepAll) so tests exercise sweep
 // behavior directly with a fake clock instead of waiting on ticks.
 func (s *store) startSweeper() {
-	interval := max(s.window, s.penaltyTTL) / 4
-	interval = min(max(interval, time.Second), time.Minute)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		t := time.NewTicker(interval)
+		t := time.NewTicker(s.sweepEvery)
 		defer t.Stop()
 		for {
 			select {

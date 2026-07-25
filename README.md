@@ -103,7 +103,52 @@ All options and defaults:
 | `status`      | `429`                | Status for boxed clients (4xx/5xx)                                   |
 | `max_keys`    | `100000`             | Hard cap on tracked clients; oldest-idle evicted beyond it           |
 
-JSON config uses the same fields under `http.handlers.hint_penaltybox`:
+### Per-tier budgets
+
+A single `(window, limit)` pair cannot express a two-tier policy like
+"5 login attempts per 15 minutes" *and* "30 elevated operations per
+minute" — tuning for one strangles the other. `tier` blocks give each
+hint level its own budget:
+
+```caddyfile
+hint_penaltybox {
+	tier 3 {
+		window      15m
+		limit       5     # five level-3 responses — logins, say
+		penalty_ttl 30m   # security offenses earn longer boxes
+	}
+	tier 2 {
+		window      60s
+		limit       30
+		penalty_ttl 5m
+	}
+}
+```
+
+Semantics:
+
+- **Within a tier, one response costs 1** — `limit 5` means five
+  level-3 responses, not weighted units. (Weighting only matters when
+  levels share a budget; inside a single-level tier it would be a
+  constant multiplier.)
+- **Budgets are independent.** Level-2 traffic never consumes tier 3's
+  budget, and vice versa — this is the point of the feature.
+- **Fallback:** a counted level without its own tier uses the nearest
+  configured tier below it (a level-3 response is at least as sensitive
+  as level 2); if none, the default top-level budget, which keeps the
+  original weighted semantics.
+- **Boxing is whole-client:** crossing any tier's limit boxes the key
+  for all traffic, with that tier's `penalty_ttl`. `Retry-After` is the
+  remaining time of the longest active box.
+- **Omitted tier fields inherit** the top-level `window`, `limit`, and
+  `penalty_ttl`.
+- Configs without `tier` blocks behave exactly as before.
+
+The vendor parallel holds: Fastly expresses this as multiple
+`ratecounter`/`penaltybox` pairs, HAProxy as separate `gpc` counters.
+
+JSON config uses the same fields under `http.handlers.hint_penaltybox`
+(tiers keyed by level):
 
 ```json
 {
@@ -111,7 +156,10 @@ JSON config uses the same fields under `http.handlers.hint_penaltybox`:
 	"min_level": 2,
 	"window": "60s",
 	"limit": 30,
-	"penalty_ttl": "5m"
+	"penalty_ttl": "5m",
+	"tiers": {
+		"3": { "window": "15m", "limit": 5, "penalty_ttl": "30m" }
+	}
 }
 ```
 

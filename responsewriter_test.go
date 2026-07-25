@@ -93,9 +93,8 @@ func TestInterceptIdempotent(t *testing.T) {
 	_, _ = rw.Write([]byte("b"))
 	rw.finalize()
 
-	e := st.shardFor("k").entries["k"]
-	if e.total != 3 {
-		t.Errorf("hint must be counted exactly once, got %d units", e.total)
+	if got := st.shardFor("k").entries["k"].counters[0].total; got != 3 {
+		t.Errorf("hint must be counted exactly once, got %d units", got)
 	}
 }
 

@@ -124,6 +124,41 @@ else
 	fail "garbage level boxed or errored (got $c)"
 fi
 
+echo "=== scenario 6b: two-tier policy (tight tier 3, loose tier 2) ==="
+TIER_BASE="http://e2e-caddy:8091"
+tcode() {
+	curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $1" "$TIER_BASE/?$2"
+}
+# 20 level-2 responses: inside tier 2's budget of 50, and they must not
+# consume tier 3's budget of 2.
+ok=true
+for i in $(seq 1 20); do
+	c=$(tcode 10.6.6.6 "level=2")
+	[ "$c" = "200" ] || { ok=false; break; }
+done
+if $ok; then
+	pass "level-2 traffic flows inside its own tier budget"
+else
+	fail "level-2 traffic boxed prematurely (got $c)"
+fi
+# Tier 3 budget is untouched: 2 allowed, 3rd crosses, 4th rejected.
+for i in 1 2 3; do
+	c=$(tcode 10.6.6.6 "level=3")
+	[ "$c" = "200" ] || fail "level-3 request $i should pass on its own budget, got $c"
+done
+c=$(tcode 10.6.6.6 "level=2")
+if [ "$c" = "429" ]; then
+	pass "tier-3 crossing boxes the client for all traffic"
+else
+	fail "expected 429 after tier-3 crossing, got $c"
+fi
+c=$(tcode 10.6.6.7 "level=3")
+if [ "$c" = "200" ]; then
+	pass "tier boxing is per-client"
+else
+	fail "expected 200 for distinct client on tiered listener, got $c"
+fi
+
 echo "=== scenario 6: box expires after penalty_ttl ==="
 sleep 4
 c=$(code 10.3.3.5 "level=1")

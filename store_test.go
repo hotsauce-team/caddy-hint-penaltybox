@@ -85,8 +85,8 @@ func TestWindowExpiry(t *testing.T) {
 	if s.add("k", 3) {
 		t.Fatal("old units should have decayed out of the window")
 	}
-	if e := s.shardFor("k").entries["k"]; e.total != 3 {
-		t.Fatalf("expected only the fresh 3 units, got total %d", e.total)
+	if got := s.shardFor("k").entries["k"].counters[0].total; got != 3 {
+		t.Fatalf("expected only the fresh 3 units, got total %d", got)
 	}
 }
 
@@ -102,12 +102,12 @@ func TestWindowPartialDecay(t *testing.T) {
 	}
 	clk.Advance(8 * time.Second)
 	s.add("k", 1)
-	e := s.shardFor("k").entries["k"]
-	// After 8s of decay past a full ring, 16-9=7 old units + 1 new ± ring
-	// boundary effects; assert the important property: strictly between
-	// fresh-only and everything-retained.
-	if e.total <= 1 || e.total >= 17 {
-		t.Fatalf("expected partial decay, got total %d", e.total)
+	got := s.shardFor("k").entries["k"].counters[0].total
+	// After 8s of decay past a full ring, roughly half the old units
+	// survive ± ring boundary effects; assert the important property:
+	// strictly between fresh-only and everything-retained.
+	if got <= 1 || got >= 17 {
+		t.Fatalf("expected partial decay, got total %d", got)
 	}
 }
 

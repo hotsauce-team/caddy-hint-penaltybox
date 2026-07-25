@@ -64,10 +64,33 @@ type Handler struct {
 	// evicted. Default 100000.
 	MaxKeys int `json:"max_keys,omitempty"`
 
+	// Tiers gives a level its own budget, separate from the default
+	// window/limit/penalty_ttl. Keyed by hint level ("2", "3"). Within a
+	// tier each response costs 1 (not `level` units — weighting only
+	// matters when levels share a budget), so `limit` is a plain
+	// response count. A counted level without its own tier uses the
+	// nearest configured tier below it, else the default budget (which
+	// keeps the original weighted semantics). Omitted tier fields
+	// inherit the top-level window/limit/penalty_ttl.
+	Tiers map[int]TierConfig `json:"tiers,omitempty"`
+
 	store       boxStore
 	headerCanon string
 	stripOn     bool
 	logger      *zap.Logger
+}
+
+// TierConfig is a per-level budget (see Handler.Tiers).
+type TierConfig struct {
+	// Window is the sliding window for this tier.
+	Window caddy.Duration `json:"window,omitempty"`
+
+	// Limit is the number of responses at this tier's level allowed per
+	// window; exceeding it (strictly) boxes the client.
+	Limit int `json:"limit,omitempty"`
+
+	// PenaltyTTL is how long this tier's box lasts.
+	PenaltyTTL caddy.Duration `json:"penalty_ttl,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -108,15 +131,37 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.MaxKeys == 0 {
 		h.MaxKeys = 100_000
 	}
+	// Tier fields inherit the top-level values when omitted.
+	for level, t := range h.Tiers {
+		if t.Window == 0 {
+			t.Window = h.Window
+		}
+		if t.Limit == 0 {
+			t.Limit = h.Limit
+		}
+		if t.PenaltyTTL == 0 {
+			t.PenaltyTTL = h.PenaltyTTL
+		}
+		h.Tiers[level] = t
+	}
 	h.stripOn = h.Strip == nil || *h.Strip
 	h.headerCanon = textproto.CanonicalMIMEHeaderKey(h.Header)
 	h.logger = ctx.Logger()
 
+	tiers := make(map[int]tierSpec, len(h.Tiers))
+	for level, t := range h.Tiers {
+		tiers[level] = tierSpec{
+			window:     time.Duration(t.Window),
+			limit:      t.Limit,
+			penaltyTTL: time.Duration(t.PenaltyTTL),
+		}
+	}
 	st := newStore(storeConfig{
 		window:     time.Duration(h.Window),
 		limit:      h.Limit,
 		penaltyTTL: time.Duration(h.PenaltyTTL),
 		maxKeys:    h.MaxKeys,
+		tiers:      tiers,
 	}, realClock{})
 	st.startSweeper()
 	h.store = st
@@ -146,6 +191,23 @@ func (h *Handler) Validate() error {
 	}
 	if h.MaxKeys <= 0 {
 		return fmt.Errorf("max_keys must be positive, got %d", h.MaxKeys)
+	}
+	for level, t := range h.Tiers {
+		if level < 1 || level > maxLevel {
+			return fmt.Errorf("tier level must be 1, 2, or 3, got %d", level)
+		}
+		if level < h.MinLevel {
+			return fmt.Errorf("tier %d is below min_level %d and would never count", level, h.MinLevel)
+		}
+		if t.Window <= 0 {
+			return fmt.Errorf("tier %d: window must be positive, got %v", level, time.Duration(t.Window))
+		}
+		if t.Limit <= 0 {
+			return fmt.Errorf("tier %d: limit must be positive, got %d", level, t.Limit)
+		}
+		if t.PenaltyTTL <= 0 {
+			return fmt.Errorf("tier %d: penalty_ttl must be positive, got %v", level, time.Duration(t.PenaltyTTL))
+		}
 	}
 	return nil
 }
