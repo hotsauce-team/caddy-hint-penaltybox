@@ -3,6 +3,13 @@
 {
 	admin off
 	auto_https off
+
+	# Souin HTTP cache backed by Otter (in-memory) storage.
+	cache {
+		ttl 30s
+		otter
+	}
+
 	servers {
 		# The e2e runner lives on the compose network (private range), so
 		# its X-Forwarded-For is trusted and {client_ip} resolves to it —
@@ -11,6 +18,7 @@
 	}
 }
 
+# Plain penalty box, no caching.
 :8080 {
 	route {
 		hint_penaltybox {
@@ -19,6 +27,22 @@
 			limit 6
 			penalty_ttl 3s
 		}
+		reverse_proxy e2e-upstream:8081
+	}
+}
+
+# Penalty box in front of the Souin cache: boxed clients are rejected
+# before the cache, stored responses replay their hint header through
+# the module (so cache hits count and stay stripped).
+:8090 {
+	route {
+		hint_penaltybox {
+			min_level 2
+			window 10s
+			limit 6
+			penalty_ttl 3s
+		}
+		cache
 		reverse_proxy e2e-upstream:8081
 	}
 }

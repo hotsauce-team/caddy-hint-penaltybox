@@ -6,6 +6,7 @@
 set -u
 
 BASE="http://e2e-caddy:8080"
+CACHED_BASE="http://e2e-caddy:8090" # same module + Souin cache (Otter storage)
 FAILURES=0
 
 pass() { echo "PASS: $1"; }
@@ -16,9 +17,23 @@ code() {
 	curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $1" "$BASE/?$2"
 }
 
-# headers <client-ip> <query> -> prints response headers (lowercased names by curl -w? no: raw)
+# headers <client-ip> <query> -> prints raw response headers
 headers() {
 	curl -s -D - -o /dev/null -H "X-Forwarded-For: $1" "$BASE/?$2"
+}
+
+# ccode/cheaders: same, against the cached listener
+ccode() {
+	curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $1" "$CACHED_BASE/?$2"
+}
+
+cheaders() {
+	curl -s -D - -o /dev/null -H "X-Forwarded-For: $1" "$CACHED_BASE/?$2"
+}
+
+# cache_status <client-ip> <query> -> prints the Cache-Status header value
+cache_status() {
+	cheaders "$1" "$2" | tr -d '\r' | awk -F': ' 'tolower($1)=="cache-status" {print $2}'
 }
 
 echo "=== waiting for e2e-caddy to become ready ==="
@@ -116,6 +131,57 @@ if [ "$c" = "200" ]; then
 	pass "boxed client allowed again after TTL"
 else
 	fail "expected 200 after box expiry, got $c"
+fi
+
+echo "=== scenario 7: Souin cache (Otter storage) works behind the module ==="
+cs=$(cache_status 10.7.7.1 "level=1&page=a")
+case "$cs" in
+*Souin*) pass "Souin answered on first request ($cs)" ;;
+*) fail "expected a Souin Cache-Status header, got '$cs'" ;;
+esac
+cs=$(cache_status 10.7.7.1 "level=1&page=a")
+case "$cs" in
+*hit*) pass "second request served from cache ($cs)" ;;
+*) fail "expected a cache hit on second request, got '$cs'" ;;
+esac
+
+echo "=== scenario 8: hint header stripped on cache MISS and HIT alike ==="
+# Fresh URL: first response is a miss (stored), second (other client) a hit.
+if cheaders 10.7.7.1 "level=2&page=b" | grep -qi '^x-rate-limit-level'; then
+	fail "hint header leaked on cache-miss response"
+else
+	pass "hint header stripped on cache-miss response"
+fi
+resp=$(cheaders 10.7.7.2 "level=2&page=b")
+if echo "$resp" | grep -qi '^x-rate-limit-level'; then
+	fail "hint header leaked on cache-hit response"
+else
+	pass "hint header stripped on cache-hit response"
+fi
+if ! echo "$resp" | tr -d '\r' | grep -i '^cache-status' | grep -q 'hit'; then
+	fail "scenario 8 second response was not a cache hit (Souin config issue?)"
+fi
+
+echo "=== scenario 9: cached hint headers still count — hammering a cached level-3 URL boxes ==="
+# Request 1 is a miss (3 units); requests 2-3 are hits whose stored
+# X-Rate-Limit-Level replays through the module (3 units each): 9 > 6.
+for i in 1 2 3; do
+	c=$(ccode 10.7.7.3 "level=3&page=c")
+	[ "$c" = "200" ] || fail "cached request $i should pass while budget lasts, got $c"
+done
+c=$(ccode 10.7.7.3 "level=3&page=c")
+if [ "$c" = "429" ]; then
+	pass "client boxed by cache-served hint headers"
+else
+	fail "expected 429 after cached level-3 responses, got $c"
+fi
+
+echo "=== scenario 10: shared cache does not break client isolation ==="
+c=$(ccode 10.7.7.4 "level=3&page=c")
+if [ "$c" = "200" ]; then
+	pass "distinct client still served (from cache) while another is boxed"
+else
+	fail "expected 200 for distinct client on cached URL, got $c"
 fi
 
 echo ""

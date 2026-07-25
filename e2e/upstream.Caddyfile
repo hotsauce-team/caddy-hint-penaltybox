@@ -8,5 +8,7 @@
 
 :8081 {
 	header X-Rate-Limit-Level "{query.level}"
+	# Explicit freshness so Souin stores the response (RFC 7234).
+	header Cache-Control "public, max-age=30"
 	respond "upstream ok" 200
 }

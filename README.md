@@ -141,6 +141,36 @@ configuration, which is where XFF trust belongs.
   an attacker rotating IPs exhausts the cap into evictions, not into
   unbounded memory. Actively boxed entries are the last to be evicted.
 
+## Compatibility with Souin (HTTP cache)
+
+The e2e suite builds and tests the module alongside
+[Souin](https://github.com/darkweak/souin) with
+[Otter](https://github.com/darkweak/storages) storage. Place
+`hint_penaltybox` **before** `cache` in the route:
+
+```caddyfile
+route {
+	hint_penaltybox { ... }
+	cache
+	reverse_proxy localhost:8000
+}
+```
+
+With that order (all verified by `make e2e`):
+
+- Boxed clients get `429` before the cache — no free cached reads while
+  boxed.
+- Souin stores the upstream response *including* the hint header, so
+  **cache hits replay the hint through the module**: hits count toward
+  the budget exactly like origin responses, and a client hammering a
+  cached level-3 URL still gets boxed.
+- The header is stripped from every client-facing response, cache hit
+  or miss — it lives only inside the cache store.
+
+(If you instead put `cache` before `hint_penaltybox`, cache hits bypass
+the module entirely: stored responses are already stripped, but boxed
+clients can keep reading cached pages and hits never count.)
+
 ## Development
 
 No local Go toolchain needed — everything runs in Docker:
@@ -148,7 +178,7 @@ No local Go toolchain needed — everything runs in Docker:
 ```sh
 make test              # unit tests (race detector, coverage)
 make test-integration  # caddytest harness against an in-process Caddy
-make e2e               # xcaddy-built binary + stub origin + curl scenarios
+make e2e               # xcaddy build (incl. Souin+Otter) + stub origin + curl scenarios
 make lint              # golangci-lint
 ```
 
