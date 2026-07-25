@@ -1,0 +1,24 @@
+# The module-enabled Caddy under e2e test. Budgets are tuned small so
+# the scenario script boxes quickly and recovers within seconds.
+{
+	admin off
+	auto_https off
+	servers {
+		# The e2e runner lives on the compose network (private range), so
+		# its X-Forwarded-For is trusted and {client_ip} resolves to it —
+		# this exercises the real client-key path the design doc mandates.
+		trusted_proxies static private_ranges
+	}
+}
+
+:8080 {
+	route {
+		hint_penaltybox {
+			min_level 2
+			window 10s
+			limit 6
+			penalty_ttl 3s
+		}
+		reverse_proxy e2e-upstream:8081
+	}
+}
