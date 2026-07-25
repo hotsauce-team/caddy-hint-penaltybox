@@ -223,6 +223,59 @@ func TestIntegrationGarbageLevelsSafe(t *testing.T) {
 	}
 }
 
+// Two-tier policy: a tight tier-3 budget (logins) and a loose tier-2
+// budget (elevated admin traffic) enforced independently for the same
+// client — the case a single (window, limit) pair cannot express.
+func TestIntegrationTierBudgets(t *testing.T) {
+	tester := caddytest.NewTester(t)
+	tester.InitServer(testConfig(`hint_penaltybox {
+			key {header.X-Test-Client}
+			tier 3 {
+				window      30s
+				limit       2
+				penalty_ttl 2s
+			}
+			tier 2 {
+				window      30s
+				limit       50
+				penalty_ttl 1m
+			}
+		}`), "caddyfile")
+
+	// Plenty of level-2 traffic: inside tier 2's budget, and it must not
+	// consume tier 3's.
+	for i := 0; i < 20; i++ {
+		if resp := get(t, tester, "heidi", "2"); resp.StatusCode != 200 {
+			t.Fatalf("level-2 request %d should pass, got %d", i+1, resp.StatusCode)
+		}
+	}
+	// Tier 3 still has its full budget of 2; the 3rd level-3 boxes.
+	for i := 0; i < 3; i++ {
+		if resp := get(t, tester, "heidi", "3"); resp.StatusCode != 200 {
+			t.Fatalf("level-3 request %d should pass (tier budget untouched by level 2), got %d", i+1, resp.StatusCode)
+		}
+	}
+	resp := get(t, tester, "heidi", "2")
+	if resp.StatusCode != 429 {
+		t.Fatalf("expected 429 after crossing tier-3 limit, got %d", resp.StatusCode)
+	}
+	ra, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+	if err != nil || ra < 1 || ra > 2 {
+		t.Fatalf("Retry-After must reflect the tier-3 TTL, got %q", resp.Header.Get("Retry-After"))
+	}
+
+	// Another client is unaffected.
+	if resp := get(t, tester, "ivan", "3"); resp.StatusCode != 200 {
+		t.Fatalf("boxing heidi must not affect ivan, got %d", resp.StatusCode)
+	}
+
+	// After the short tier-3 TTL, heidi flows again.
+	time.Sleep(2500 * time.Millisecond)
+	if resp := get(t, tester, "heidi", "1"); resp.StatusCode != 200 {
+		t.Fatalf("expected 200 after tier-3 box expiry, got %d", resp.StatusCode)
+	}
+}
+
 // min_level defaults to 2, so level-1 responses never count toward the
 // budget even with a limit small enough that counting them would box
 // immediately.

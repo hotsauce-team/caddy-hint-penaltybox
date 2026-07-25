@@ -31,6 +31,26 @@
 	}
 }
 
+# Two-tier policy: tight tier-3 budget (think logins), loose tier-2
+# budget (elevated admin traffic), enforced independently per client.
+:8091 {
+	route {
+		hint_penaltybox {
+			tier 3 {
+				window      30s
+				limit       2
+				penalty_ttl 3s
+			}
+			tier 2 {
+				window      30s
+				limit       50
+				penalty_ttl 1m
+			}
+		}
+		reverse_proxy e2e-upstream:8081
+	}
+}
+
 # Penalty box in front of the Souin cache: boxed clients are rejected
 # before the cache, stored responses replay their hint header through
 # the module (so cache hits count and stay stripped).

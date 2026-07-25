@@ -34,6 +34,11 @@ func parseCaddyfile(helper httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, e
 //	    strip       [true|false]
 //	    status      <code>
 //	    max_keys    <n>
+//	    tier <level> {
+//	        window      <duration>
+//	        limit       <n>
+//	        penalty_ttl <duration>
+//	    }
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -119,6 +124,58 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid max_keys %q: %v", d.Val(), err)
 			}
 			h.MaxKeys = n
+		case "tier":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			level, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid tier level %q: %v", d.Val(), err)
+			}
+			if h.Tiers == nil {
+				h.Tiers = make(map[int]TierConfig)
+			}
+			if _, dup := h.Tiers[level]; dup {
+				return d.Errf("duplicate tier %d", level)
+			}
+			var tc TierConfig
+			for d.NextBlock(1) {
+				switch d.Val() {
+				case "window":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					dur, err := caddy.ParseDuration(d.Val())
+					if err != nil {
+						return d.Errf("invalid tier window %q: %v", d.Val(), err)
+					}
+					tc.Window = caddy.Duration(dur)
+				case "limit":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					n, err := strconv.Atoi(d.Val())
+					if err != nil {
+						return d.Errf("invalid tier limit %q: %v", d.Val(), err)
+					}
+					tc.Limit = n
+				case "penalty_ttl":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					dur, err := caddy.ParseDuration(d.Val())
+					if err != nil {
+						return d.Errf("invalid tier penalty_ttl %q: %v", d.Val(), err)
+					}
+					tc.PenaltyTTL = caddy.Duration(dur)
+				default:
+					return d.Errf("unknown tier subdirective %q", d.Val())
+				}
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+			}
+			h.Tiers[level] = tc
 		default:
 			return d.Errf("unknown subdirective %q", d.Val())
 		}
