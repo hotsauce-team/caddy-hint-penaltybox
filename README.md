@@ -1,5 +1,12 @@
 # caddy-hint-penaltybox
 
+> [!IMPORTANT]
+> **Superseded.** This module now lives on as [`penaltybox`](https://github.com/smallhoursorg/hotserve/tree/main/penaltybox),
+> compiled into [hotserve](https://github.com/smallhoursorg/hotserve) — the same
+> `X-Rate-Limit-Level` hint mechanism, maintained there by [smallhours](https://github.com/smallhoursorg).
+> This repository is archived: existing tags remain fetchable and the code stays readable,
+> but no further changes will land here.
+
 A Caddy v2 module that turns an origin's **rate-limit hint header** into
 edge-side throttling using the classic **penalty box** pattern: every
 origin response labeled `X-Rate-Limit-Level: 2` or `3` adds weighted
